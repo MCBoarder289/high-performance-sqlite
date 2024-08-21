@@ -3,7 +3,7 @@
 
 ## Introduction
 * Traditional DBs have a client-server model
-    * Files are all over, not supposed to mention those
+    * Files are all over, not supposed to mess with those typically
 * SQLite does NOT - it's a C library to talks to the file on the disk
     * Far less configuration
     * Database is a single file
@@ -14,7 +14,7 @@
 
 * SQLite is safe, and has strong guarantees that databases provide (ex: ACID Transactions)
 * Open Source, but not Open Contribution - kind of weird
-    * libsql - is open contribution fork of SQL
+    * [libsql](https://github.com/tursodatabase/libsql) - is open contribution fork of SQL
 
 * Strictly defined file format. Great backwards/forwards compatibility
     * Makes it easy to distribute
@@ -76,7 +76,7 @@
 ### SQLite's File Format
 * The file is a lot of equal size chunks of data.
 * When you delete it. It deletes, the page where they are
-* Chunk is configurable- and configuration itself is a page
+* Chunk size is configurable- and configuration itself is a page
 * First line is ASCII of "SQLite format 3"
 * Settings like page size/journal mode, etc. are all at the front of the file to inform sqlite how to operate
 
@@ -123,7 +123,9 @@
 ### Virtual Tables
 * Allows you to query a table that is not actually written to your database
 * Example:  Reading a CSV file but operating on it in SQLite
-* Useful to generat data
+* Useful to generate data
+
+
 
 
 

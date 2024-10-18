@@ -166,7 +166,7 @@
 
 * Can mix and match strictness and permissive types
     * Good use case of this would be a key-value store
-    * Declare table  as strict, and use an "any" type
+    * Declare table as strict, and use an "any" type
 
 ### Dates
 
@@ -251,3 +251,179 @@
     * Extracting JSON automatically
     * Breaking up email address parts
     * Math
+
+## Optimizing SQLite
+
+### Locking
+
+* One criticism is that it's not ready for a production app, and that's because it can only support one concurrent writer.
+* Can support many thousands of writes per second -> fine for a long time with SQLite
+* Locking ensures we don't read or write partially committed transactions and it's truly ACID compliant
+* 5 states:
+    1. Unlocked - no reading or writing
+    2. Shared Lock - you can read it, everyone can read it, but nobody can write to it
+    3. Reserved Lock - When a process announces it's going to write, but not writing yet. New Shared Locks can still be acquired
+    4. Pending - No new readers can start. Waiting for all open shared locks to go away and no new readers can start a shared lock. Waiting for all the readers to stop.
+    5. Exclusive Lock - Writes to the database, and gets out of this state as fast as possible
+* Happens super fast in a matter of milliseconds
+
+### Rollback Mode
+
+* Single most important setting to make sure it's performannt - Journal mode
+* pragma journal_mode;
+* WAL mode vs. Rollback mode
+* The journal is the way SQlite ensures you have atomic commits and rollbacks.
+* In Rollback mode, when somebody goes to write, whichever page is going to be written to is copied and set aside. (usually a dbname.db-journal file)
+* New data is overwriting the original page, and when the transaction is commited, the journal becomes irrelevant, so this is where rollback mode can either delete, truncate, zero-fill, etc.
+* Rollback is the default mode, need to change it for WAL mode. Turso supports only WAL only
+* If a rollback is needed, it uses the journal that was made and can replace the newly written one to rollback. This is why writing means all of the readers must stop - the file is being modified.
+* Transaction is not completed until the journal file is dealt with.
+
+### WAL mode
+
+* This is the most important thing for high performance SQLite
+* Set this once, and it's persistent
+* WAL = Write Ahead Logging
+* Creates a new file "database.sqlite-wal" - just starts appending to the WAL
+* At some point, a checkpoint happens, and it's merged with the database, and then WAL happens again.
+* Why is this better? It's a whole lot faster.
+* This means we can have concurrent readers along with a single writer. Single writer appends to WAL file. But readers will look at the WAL and sees the last transaction that is visible to me. 
+    * Then it remembers that for the duration. Writers don't limit readers.
+
+### Benchmarks WAL vs. Rollback
+
+* Orders of magnitude faster to run in WAL mode vs. rollback
+
+### Busy Timeout
+
+* Default is 0, meaning it will throw an error if any writer tries to write while it's done.
+* This is a per-connection pragma, which means that every connection needs to specity it.
+
+### Trasaction Modes
+
+* 3 modes: deferred, Exclusive, and immediate, and in WAL mode, exclusive and immediate are the same thing
+* Deferred is the default
+* Important on applicaiton side: When you're inside a deferred transaction, and you try to upgrade to an exclusive lock and the lock is taken, you don't get your wait time, you get an error.
+* On the application side, whenever you connect to the db, you want the transaction mode to immediate.
+* Need to make sure the writes should wrap everything in an *immediate* transaction (many should already wrap things in a transaction, but might not be an immediate one in SQLite, need to research individually based on how you're connecting)
+
+### Vacuum
+
+* Deletes don't actually change the size of the file, because the pages still exist.
+* vacuum command will make a copy and compresses so the free pages are gone.
+* Reasons to vacuum:
+    * Disk Space - need more space
+    * Reduce Fragmentation - with inserts/updates/deletes, rows can get fragmented
+* Vacuum downsides:
+    * Can be slow
+    * Uses an exclusive lock
+    * Takes more space temporarily (making that copy)
+
+### Analyze and Optimize
+
+* SQLite needs to know some stats about tables so you can optimize queries
+* select * from sqlite_stat1;
+* pragma optimize -> it could potentially analyze the tables and indexes, only will analyze if necessary
+* You want to run it pretty often, but it can be expensive on a large database
+* pragma analysis_limit: - can be between 0 (unlimited) - 1000. Can run partial analyses.
+* Run it on a schedule, every couple hours maybe?
+
+### Suggested Pragmas
+
+Reasonable starting point:
+
+* PRAGMA journal_mode = WAL;
+* PRAGMA busy_timeout = 5000; 
+* PRAGMA synchronous = normal;  controls how SQLite will wait for the data to be written on the disk- this makes it a little more safe
+* PRAGMA cache_size = 2000; - amount it will hold in memory - positive number is number of pages. negative number is size
+* PRAGMA temp_store = memory;
+* PRAGMA foreign_keys = true;
+
+### Faster Inserts
+For inserting huge amounts of data at once
+* PRAGMA synchronous = off; - risky
+* Bunching a bunch of inserts into a single transactions.
+
+## Indexes
+
+### Introduction to indexes
+* Much of this applies to other databases
+
+1. It is a separate data structure (b-tree or a b+ tree), your table is a b tree.
+2. Duplicate Data (They keep a copy of part of your data (duplicate))
+    * Maintenance overhead because inserts, updates, deletes needs to updates indices.
+3. Pointers included (rowid)
+    * every index has a pointer to the row in the main table, along with usually the rowid
+
+* The data drives the schema, the queries drive the indexes (depends on how you access the data)
+    * Access patterns drive index placement
+
+### B+ Trees
+
+* Underlying data structure that makes indexing fast/effective.
+* Bottom of the tree is the "leaf" node - they contain the data, and the pointer back to the table.
+* Starts at the root node.
+* Point of this is reading the whole table (Table Scan)
+
+
+### Primary, Secondary, and Clustered Indexes
+
+* Primary Key = identity of this table, and unique constraint
+    * Declaring what the "clustered index" is (same in MySQL and Postgres)
+    * Clustered index is how the data on the disk is actually arranged
+    * Leaf node would have the entire row
+* Leaf node of secondary index: not the row data, we find a pointer to the row data in the clustered index
+* In SQLite, PK is separate, it uses the "secret" rowid. If you have a PK that is an alias for the rowid, that's fine and you skip treating the column as a secondary index.
+
+### Wihtout rowid tables
+* If you declare a without rowid tables, your PK becomes the clustered index
+* Random uuid is bad as a PK because you're rebuilding / rebalancing the b-tree 
+
+### Imposter Tables
+* Probably should never do this - way to create a table out of an index, so you can directly query the index.
+* Good for teaching the concept though
+
+### Primary key data types
+* Recommendation - use integers, they're smaller than big strings and generally more performant
+* In SQLite, uuid/guid/ulid is not as much of a penalty because it uses secret rowid, so B-tree fragmentation is not an issue
+* Generate ID on client-side, thats when you want a non-integer PK (Optimistic UI)
+
+### Where to add indexes
+* You have to look at queries and access patterns in order to determine what indexes to build
+* If you add an index on every column, that's a bad idea. They're not free - inserts/updates/deletes will have a performance penalty.
+* Index anything that shows up in a WHERE clause - the where, is important, but what about the grouping, selectng, ordering as well
+* .eqp on = explain query plan is on -> outputs the query plan
+* If you're not on the CLI, you can do `explain select count(*) FROM users`, which shows all of the different operations/VM instructions
+    * More readable `explain query plan select count(*) FROM users;`
+* Indexes are good for strict equality checks in the WHERE clause, can also use unbounded and bounded ranges.
+* Ordering is still using the index as well in the example, index-assisted ordrers.
+    * Unindexed column would construct a temporary b-tree after a full table scan
+* Grouping can also be assisted with indexes
+
+### Index Selectivity
+* Sometime a bad idea if the index doesn't help you narrow anything down.
+* `Cardinality` = number of unique values
+* `Selectivity` = Ratio of Cardinality to record count (Distinct Values / Row Count)
+    * 0 - 1, closer to 0 is not selective, closer to 1 is selective
+* Usually one index is picked by the query planner, and sometimes it can use multiple indexes, but that's more of an exception
+* Want to make an index that is "pickable"
+* Rule of thumb- put indexes on columns with lots of unique values (high Cardinality), has a high selectivity.
+
+### Composite Indexes
+* Mutiple columns as a single index
+* Order matters quite a bit - the order that you declare the columns that you index in. In you query order doesn't matter, but in your index it really matters.
+* Rule 1: index is usable from left to right no skipping of columns
+    * Example: First name blocks access to the last name portion 
+* Rule 2: Stops at the first range condition
+    * Strict equality will not cause the stoppage, but a range condition will mean it will stop (less than or greater than or between)
+* Range columns that you use for ranges, should go at the end to meet the needs of many different queries
+
+### Composite Ordering
+* If you don't see the temporary B-tree in the explain plan, then you know it's leveraging the index for the sorting
+
+### Covering Indexes
+* They are not a discree thing and cannot be created. 
+* Normal index in a special situation
+* "Covers" the needs of the entire query
+    * It doesn't have to do the secondary lookup in the table b-tree because all of the information is in the index b-tree.
+
